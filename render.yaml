@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: free-thinkers-club
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_ADMIN_USERNAME
+        sync: false
+      - key: VITE_ADMIN_PASSWORD
+        sync: false
