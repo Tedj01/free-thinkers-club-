@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { ADMIN_USERNAME, ADMIN_PASSWORD } from "./config.js";
+import { savePdf, getPdf, deletePdf } from "./pdfStorage.js";
 
 const PAPERS_STORAGE_KEY = "ftc_papers";
 
@@ -50,7 +51,7 @@ function StarRating({ value, onChange, readOnly }) {
   );
 }
 
-function Modal({ children, onClose }) {
+function Modal({ children, onClose, wide }) {
   useEffect(() => {
     const handler = e => e.key === "Escape" && onClose();
     window.addEventListener("keydown", handler);
@@ -58,7 +59,7 @@ function Modal({ children, onClose }) {
   }, [onClose]);
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.65)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, maxWidth: 680, width: "100%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 64px rgba(0,0,0,0.18)" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, maxWidth: wide ? 960 : 680, width: "100%", maxHeight: "90vh", overflowY: wide ? "hidden" : "auto", display: wide ? "flex" : "block", flexDirection: "column", boxShadow: "0 24px 64px rgba(0,0,0,0.18)" }}>
         {children}
       </div>
     </div>
@@ -83,7 +84,57 @@ export default function App() {
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [reviewForm, setReviewForm] = useState({ reviewer: "", rating: 5, comment: "" });
   const [notification, setNotification] = useState(null);
+  const [previewPaper, setPreviewPaper] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef();
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
+  const closePreview = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
+    setPreviewPaper(null);
+  };
+
+  const incrementDownloads = (paperId) => {
+    setPapers(prev => prev.map(p => p.id === paperId ? { ...p, downloads: p.downloads + 1 } : p));
+    setSelectedPaper(prev => (prev && prev.id === paperId ? { ...prev, downloads: prev.downloads + 1 } : prev));
+  };
+
+  const handleViewPdf = async (paper) => {
+    const stored = await getPdf(paper.id);
+    if (!stored?.blob) {
+      notify("No PDF available. Papers submitted before this update need to be re-uploaded.", "error");
+      return;
+    }
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    const url = URL.createObjectURL(stored.blob);
+    setPreviewUrl(url);
+    setPreviewPaper(paper);
+  };
+
+  const handleDownload = async (paper) => {
+    const stored = await getPdf(paper.id);
+    if (!stored?.blob) {
+      notify("No PDF available to download.", "error");
+      return;
+    }
+    const url = URL.createObjectURL(stored.blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = stored.fileName || paper.fileName || "paper.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    incrementDownloads(paper.id);
+    notify("Download started!");
+  };
 
   const notify = (msg, type = "success") => {
     setNotification({ msg, type });
@@ -108,29 +159,45 @@ export default function App() {
     }
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!submitForm.title || !submitForm.author || !submitForm.abstract) {
       notify("Please fill in all required fields.", "error");
       return;
     }
-    const newPaper = {
-      id: Date.now(),
-      title: submitForm.title,
-      author: submitForm.author,
-      abstract: submitForm.abstract,
-      category: submitForm.category,
-      publishedAt: new Date().toISOString(),
-      downloads: 0,
-      reviews: [],
-      fileName: submitForm.file ? submitForm.file.name : "paper.pdf"
-    };
-    setPapers(prev => [newPaper, ...prev]);
-    setSubmitSuccess(true);
-    setSubmitForm({ title: "", author: "", abstract: "", category: "Philosophy", file: null });
-    setTimeout(() => { setSubmitSuccess(false); setView("home"); }, 2500);
+    if (!submitForm.file) {
+      notify("Please upload a PDF so readers can view and download your paper.", "error");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const id = Date.now();
+      await savePdf(id, submitForm.file);
+      const newPaper = {
+        id,
+        title: submitForm.title,
+        author: submitForm.author,
+        abstract: submitForm.abstract,
+        category: submitForm.category,
+        publishedAt: new Date().toISOString(),
+        downloads: 0,
+        reviews: [],
+        fileName: submitForm.file.name,
+        hasPdf: true,
+      };
+      setPapers(prev => [newPaper, ...prev]);
+      setSubmitSuccess(true);
+      setSubmitForm({ title: "", author: "", abstract: "", category: "Philosophy", file: null });
+      if (fileRef.current) fileRef.current.value = "";
+      setTimeout(() => { setSubmitSuccess(false); setView("home"); }, 2500);
+    } catch {
+      notify("Could not save the PDF. Try a smaller file.", "error");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const handleDelete = (id) => {
+  const handleDelete = async (id) => {
+    await deletePdf(id);
     setPapers(prev => prev.filter(p => p.id !== id));
     notify("Publication deleted.");
   };
@@ -338,14 +405,16 @@ export default function App() {
                 <textarea style={styles.textarea} placeholder="A clear summary of your research, its methodology, and key findings…" value={submitForm.abstract} onChange={e => setSubmitForm(p => ({ ...p, abstract: e.target.value }))} />
               </div>
               <div style={styles.formGroup}>
-                <label style={styles.label}>Upload PDF</label>
+                <label style={styles.label}>Upload PDF *</label>
                 <input ref={fileRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={e => setSubmitForm(p => ({ ...p, file: e.target.files[0] }))} />
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <button style={{ ...styles.btn, ...styles.btnOutline }} onClick={() => fileRef.current.click()}>Choose File</button>
                   <span style={{ fontSize: 13, color: "#a09070", fontFamily: "sans-serif" }}>{submitForm.file ? submitForm.file.name : "No file selected"}</span>
                 </div>
               </div>
-              <button style={{ ...styles.btn, ...styles.btnPrimary, padding: "11px 32px", fontSize: 15 }} onClick={handleSubmit}>Submit Paper →</button>
+              <button style={{ ...styles.btn, ...styles.btnPrimary, padding: "11px 32px", fontSize: 15 }} onClick={handleSubmit} disabled={submitting}>
+                {submitting ? "Uploading…" : "Submit Paper →"}
+              </button>
             </div>
           )}
         </div>
@@ -392,7 +461,10 @@ export default function App() {
             <p style={{ fontFamily: "sans-serif", fontSize: 15, lineHeight: 1.8, color: "#3a2a10", marginBottom: "1.5rem" }}>{selectedPaper.abstract}</p>
 
             <div style={{ display: "flex", gap: 10, marginBottom: "2rem", flexWrap: "wrap" }}>
-              <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={() => { setPapers(prev => prev.map(p => p.id === selectedPaper.id ? { ...p, downloads: p.downloads + 1 } : p)); notify("Download started!"); }}>
+              <button style={{ ...styles.btn, ...styles.btnOutline }} onClick={() => handleViewPdf(selectedPaper)}>
+                View Paper
+              </button>
+              <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={() => handleDownload(selectedPaper)}>
                 ⬇ Download PDF
               </button>
               <button style={{ ...styles.btn, ...styles.btnOutline }} onClick={() => { setReviewModal(selectedPaper.id); setSelectedPaper(null); }}>
@@ -418,6 +490,27 @@ export default function App() {
               </div>
             ))}
           </div>
+        </Modal>
+      )}
+
+      {/* PDF Preview */}
+      {previewPaper && previewUrl && (
+        <Modal wide onClose={closePreview}>
+          <div style={{ padding: "1rem 1.25rem", borderBottom: "1px solid #e8dcc8", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+            <div>
+              <h3 style={{ fontStyle: "italic", fontSize: 18, color: "#1a1208", margin: 0 }}>{previewPaper.title}</h3>
+              <p style={{ fontFamily: "sans-serif", fontSize: 13, color: "#7a6040", margin: "4px 0 0" }}>{previewPaper.author}</p>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button style={{ ...styles.btn, ...styles.btnPrimary, padding: "6px 14px", fontSize: 13 }} onClick={() => handleDownload(previewPaper)}>⬇ Download</button>
+              <button style={{ background: "none", border: "none", fontSize: 22, cursor: "pointer", color: "#a09070" }} onClick={closePreview}>×</button>
+            </div>
+          </div>
+          <iframe
+            title={`Preview: ${previewPaper.title}`}
+            src={previewUrl}
+            style={{ flex: 1, width: "100%", minHeight: "70vh", border: "none", background: "#f5f0e6" }}
+          />
         </Modal>
       )}
 
